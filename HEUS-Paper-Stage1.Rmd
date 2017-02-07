@@ -5,19 +5,143 @@ date: "February 6, 2017"
 output: pdf_document
 ---
 
+## Import and fire packages.
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
+
+library(RMySQL)
+library(dplyr)
+library(tidyr)
+library(knitr)
+library(reshape2)
+library(plyr)
+library(DT)
+library(foreign)
+library(qdap)
+install.packages("weights")
+library(weights)
+# useful paste function
+
+paste5 <- function(..., sep = " ", collapse = NULL, na.rm = F) {
+  if (na.rm == F)
+    paste(..., sep = sep, collapse = collapse)
+  else
+    if (na.rm == T) {
+      paste.na <- function(x, sep) {
+        x <- gsub("^\\s+|\\s+$", "", x)
+        ret <- paste(na.omit(x), collapse = sep)
+        is.na(ret) <- ret == ""
+        return(ret)
+      }
+      df <- data.frame(..., stringsAsFactors = F)
+      ret <- apply(df, 1, FUN = function(x) paste.na(x, sep))
+
+      if (is.null(collapse))
+        ret
+      else {
+        paste.na(ret, sep = collapse)
+      }
+    }
+}
+
 ```
 
-## R Markdown
+## Data Cleaning
+# First step is to import and clean lighting data.
+```{r }
+### -- Lighting cleaning -----
 
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+# Import Lighting CSV files using cleaned CSV files on Augur.
 
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+folder <- '/Volumes/Projects/401013 - PG&E RBSA/Data/Data - MASTER/5 - Final Cleaning with QC and CEC/'
+SFlighting <- read.csv(paste(folder, 'SFlighting_clean_qc.csv', sep = "/"), stringsAsFactors = F)
+SFlightingLamp <- read.csv(paste(folder,'SFlightingLamp_clean_qc.csv', sep = "/"), stringsAsFactors = F)
+SFextlighting <- read.csv(paste(folder,'SFextlighting_clean_qc.csv', sep = "/"), stringsAsFactors = F)
+SFextlightingLamp <- read.csv(paste(folder, 'SFextlightingLamp_clean_qc.csv', sep="/"), stringsAsFactors = F)
 
+# Drop QC flags and notes
+SFlighting <- select(SFlighting, -(QC19_NoLighting:QC19_Room_its..room...))
+SFlightingLamp <- select(SFlightingLamp, -(QC19_NoLighting:QC25_room_fixture_it.y), -(QC21:QC_Lighting))
+SFextlighting <- select(SFextlighting, -(QC19_NoLighting:QC19_Room_its..room...), -Exterior)
+SFextlightingLamp <- select(SFextlightingLamp, -(QC19_NoLighting:QC19_Room_its..room...), -(QC21:QC_Lighting))
+
+SFlighting <- select(SFlighting, -(X))
+SFlightingLamp <- select(SFlightingLamp, -(X))
+SFextlighting <- select(SFextlighting, -(X))
+SFextlightingLamp <- select(SFextlightingLamp, -(X))
+
+# Join interior and exterior lighting tables
+All_Lighting_lamps <- rbind(SFlightingLamp, SFextlightingLamp)
+
+```
+
+# Add variables for effieicnt vs inefficient lighting to lamp table. Inefficient = Incandescent and Linear F and Unknown. Efficient = CFL AND LED.
+```{r }
+
+# Create flag for efficient lamp.
+All_Lighting_lamps$EfficientLamp <-NA
+for (i in 1:length(All_Lighting_lamps$siteid)){
+  if ((All_Lighting_lamps$LightingLampCategory[i]=="Halogen") | (All_Lighting_lamps$LightingLampCategory[i]=="Incandescent") | (All_Lighting_lamps$LightingLampCategory[i]=="Linear Fluorescent")) {
+      All_Lighting_lamps$EfficientLamp[i]<-"NE"
+  }
+}
+
+for (i in 1:length(All_Lighting_lamps$siteid)){
+  if ((All_Lighting_lamps$LightingLampCategory[i]=="Compact Fluorescent") | (All_Lighting_lamps$LightingLampCategory[i]=="LED")){
+      All_Lighting_lamps$EfficientLamp[i]<-"E"
+  }
+}
+  
+## Create dataframe with lamp sums.
+All_Lighting_lamps$LightingLampsPerFixture <- as.numeric(All_Lighting_lamps$LightingLampsPerFixture)
+Summary_Lighting_Eff <- All_Lighting_lamps %>% 
+  group_by(siteid, EfficientLamp)
+Summary_Lighting_Eff <- summarise_each(Summary_Lighting_Eff, funs(sum),LightingLampsPerFixture)
+Summary_Lighting_Eff <- spread(Summary_Lighting_Eff, EfficientLamp, LightingLampsPerFixture)
+
+#create variable for percent of lamps that are efficient
+Summary_Lighting_Eff <- ungroup(Summary_Lighting_Eff)
+Summary_Lighting_Eff$E[is.na(Summary_Lighting_Eff$E)] <- 0
+Summary_Lighting_Eff$NE[is.na(Summary_Lighting_Eff$NE)] <- 0
+Summary_Lighting_Eff <- mutate(Summary_Lighting_Eff, perc_eff = E/(E+NE))
+
+# assign homes to deciles
+Summary_Lighting_Eff <- mutate(Summary_Lighting_Eff, Decile = ntile(perc_eff, 10))
+
+Summary_Lighting_Eff %>% group_by(Decile) %>% summarise_each(funs(min,max),perc_eff)
+
+# append to home data
+folder <- '/Volumes/Projects/401013 - PG&E RBSA/Data/Data - MASTER/3 - Initial Cleaning and QC/'
+HomeData1<- read.csv(paste(folder, 'SFMaster_housegeometry_clean.csv', sep = "/"), stringsAsFactors = F)
+HomeData2 <- read.csv(paste('/Volumes/Projects/401013 - PG&E RBSA/Data/Data - MASTER/2 - Restructured Tables/SF_ri_demog.csv', sep = "/"), stringsAsFactors = F)
+HomeData3 <- read.csv(paste('/Volumes/Projects/401013 - PG&E RBSA/Data/Data - MASTER/2 - Restructured Tables/SF_ri_custdat.csv', sep = "/"), stringsAsFactors = F)
+
+HomeData <- left_join(HomeData1, HomeData2, by = "siteid")
+HomeData <- left_join(HomeData, HomeData3, by = "siteid")
+
+rm (HomeData1, HomeData2, HomeData3)
+Lighting_Eff_HomeData <- left_join(Summary_Lighting_Eff, HomeData, by = "siteid")
+
+## append weights
+
+Weights <- read.csv(paste('/Volumes/Projects/401013 - PG&E RBSA/Data/Data - MASTER/0 - Weights/FinalWeights_BySiteID_072816.csv', sep = "/"), stringsAsFactors = F)
+Lighting_Eff_HomeData <- left_join(Lighting_Eff_HomeData, Weights, by = "siteid")
+
+wtd.median(Lighting_Eff_HomeData$perc_eff, weights=Lighting_Eff_HomeData$weight_strata_prop, 
+             normwt=FALSE, na.rm=TRUE)
+
+Summary_Lighting_Eff %>% group_by(Decile) %>% summarise_each(funs(min,max),perc_eff)
+
+```
+
+
+## Data Analysis
 ```{r cars}
-summary(cars)
+summary(Lighting_Eff_HomeData)
+table(Lighting_Eff_HomeData$Decile)
+wtd.hist(Lighting_Eff_HomeData$perc_eff, breaks = 50, xlab = "Percent Efficient Lighting", border = "blue", col = "green", weight = Lighting_Eff_HomeData$weight_strata_prop)
 ```
+
 
 ## Including Plots
 
